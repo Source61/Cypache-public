@@ -1,0 +1,2 @@
+git add design.txt *.pyx README.md LICENSE commit
+git commit
