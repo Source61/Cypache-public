@@ -1,7 +1,6 @@
 import asyncio, fastepoll, os, time
 
 from posix.stat cimport *
-#from libc.stdio cimport *
 from posix.fcntl cimport *
 from posix.unistd cimport *
 from libc.stdlib cimport malloc, free
@@ -11,17 +10,20 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from cython.operator cimport dereference as deref
 
+import resource
+maxFds = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+
 timenow = 0
 response = b""
 
 cdef:
-  struct sFileData:
+  struct scachedFiledata:
     int fd
     unsigned int mtime
     unsigned int lastcheckmtime
     string data
-  map[string, sFileData] filedata
-  map[int, string] filedataReverse
+  map[string, scachedFiledata] cachedFiledata
+  map[int, string] cachedFiledataReverse
   vector[int] fds
 
   int appendFd(string uri):
@@ -30,14 +32,14 @@ cdef:
     if fd == -1:
       return fd
     fds.push_back(fd)
-    if fds.size() >= 1024:
+    if fds.size()+1 >= maxFds:
       oldfd = deref(fds.begin())
       close(oldfd)
-      if filedataReverse.count(oldfd) and filedata.count(filedataReverse[oldfd]):
-        filedata[filedataReverse[oldfd]].fd = -1
+      if cachedFiledataReverse.count(oldfd) and cachedFiledata.count(cachedFiledataReverse[oldfd]):
+        cachedFiledata[cachedFiledataReverse[oldfd]].fd = -1
       fds.erase(fds.begin())
-    if filedata.count(uri):
-      filedata[uri].fd = fd
+    if cachedFiledata.count(uri):
+      cachedFiledata[uri].fd = fd
     return fd
   
   double getFileMtime(int fd):
@@ -46,7 +48,7 @@ cdef:
     fstat(fd, &ss)
     return ss.st_mtim.tv_sec + (ss.st_mtim.tv_nsec / 1000000000.0)
   
-  string readFileData(int fd):
+  string readcachedFiledata(int fd):
     cdef:
       char* charptr = <char*>malloc(1000000000)
       string s
@@ -67,8 +69,8 @@ class WebServer(asyncio.Protocol):
       unsigned int newtimeint
       double lastmtime = 0.0
       int fd, oldfd
-      sFileData *fileDataPtr
-      sFileData fileDataStruct
+      scachedFiledata *cachedFiledataPtr
+      scachedFiledata cachedFiledataStruct
       string httpUri
     global response, timenow
     # Parse HTTP Headers
@@ -85,35 +87,35 @@ class WebServer(asyncio.Protocol):
     newtimeint = <unsigned int>newtime
 
     # Check if data is already cached
-    if filedata.count(httpUri):
-      fileDataPtr = &filedata[httpUri]
+    if cachedFiledata.count(httpUri):
+      cachedFiledataPtr = &cachedFiledata[httpUri]
       # Fd has been closed, lets reopen it
-      if fileDataPtr.fd == -1:
-        fd = fileDataPtr.fd = appendFd(httpUri)
+      if cachedFiledataPtr.fd == -1:
+        fd = cachedFiledataPtr.fd = appendFd(httpUri)
       else:
-        fd = fileDataPtr.fd
+        fd = cachedFiledataPtr.fd
       # File has been deleted
       if fd == -1:
-        filedata.erase(httpUri)
+        cachedFiledata.erase(httpUri)
         self.transport.send(response)
         return
       # Ensure at least 1 second has passed since the last mtime check (perf boost by only updating file once every second thus reducing calls to stat)
-      if fileDataPtr.lastcheckmtime < newtimeint:
-        fileDataPtr.lastcheckmtime = newtimeint
-        fileDataPtr.mtime = <unsigned int>getFileMtime(fd)
-        if fileDataPtr.mtime == newtimeint:
-          fileDataPtr.data = readFileData(fileDataPtr.fd)
-      self.transport.send(b"""HTTP/1.0 200 OK\r\nServer: nginx/1.22.1\r\nDate: %b\r\nContent-Type: text/html\r\nContent-Length: %d\r\nLast-Modified: Fri, 15 Nov 2024 22:21:58 GMT\r\nConnection: keep-alive\r\nAccept-Ranges: bytes\r\n\r\n%b""" % (time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode(), fileDataPtr.data.size(), fileDataPtr.data))
+      if cachedFiledataPtr.lastcheckmtime < newtimeint:
+        cachedFiledataPtr.lastcheckmtime = newtimeint
+        cachedFiledataPtr.mtime = <unsigned int>getFileMtime(fd)
+        if cachedFiledataPtr.mtime == newtimeint:
+          cachedFiledataPtr.data = readcachedFiledata(cachedFiledataPtr.fd)
+      self.transport.send(b"""HTTP/1.0 200 OK\r\nServer: nginx/1.22.1\r\nDate: %b\r\nContent-Type: text/html\r\nContent-Length: %d\r\nLast-Modified: Fri, 15 Nov 2024 22:21:58 GMT\r\nConnection: keep-alive\r\nAccept-Ranges: bytes\r\n\r\n%b""" % (time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode(), cachedFiledataPtr.data.size(), cachedFiledataPtr.data))
 
     # Else: check if file exists and open a file descriptor for it for faster future checks 
     else:
-      fd = fileDataStruct.fd = appendFd(httpUri)
+      fd = cachedFiledataStruct.fd = appendFd(httpUri)
       if fd != -1:
-        fileDataStruct.data = readFileData(fd)
-        fileDataStruct.mtime = <unsigned int>getFileMtime(fd)
-        fileDataStruct.lastcheckmtime = newtimeint
-        filedata[httpUri] = fileDataStruct
-        self.transport.send(b"""HTTP/1.0 200 OK\r\nServer: nginx/1.22.1\r\nDate: %b\r\nContent-Type: text/html\r\nContent-Length: %d\r\nLast-Modified: Fri, 15 Nov 2024 22:21:58 GMT\r\nConnection: keep-alive\r\nAccept-Ranges: bytes\r\n\r\n%b""" % (time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode(), fileDataStruct.data.size(), fileDataStruct.data))
+        cachedFiledataStruct.data = readcachedFiledata(fd)
+        cachedFiledataStruct.mtime = <unsigned int>getFileMtime(fd)
+        cachedFiledataStruct.lastcheckmtime = newtimeint
+        cachedFiledata[httpUri] = cachedFiledataStruct
+        self.transport.send(b"""HTTP/1.0 200 OK\r\nServer: nginx/1.22.1\r\nDate: %b\r\nContent-Type: text/html\r\nContent-Length: %d\r\nLast-Modified: Fri, 15 Nov 2024 22:21:58 GMT\r\nConnection: keep-alive\r\nAccept-Ranges: bytes\r\n\r\n%b""" % (time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode(), cachedFiledataStruct.data.size(), cachedFiledataStruct.data))
 
       # File does not exist ("404"/default page)
       else:
