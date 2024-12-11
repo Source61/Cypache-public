@@ -4,6 +4,7 @@ A lightning-fast and modular Python3 webserver written in Cython, known for hand
 # Performance
 
 | Name | Requests/s | Type |
+| --- | --- | --- |
 | Cypache | 216277 | Synced connections in Cython/C++* w/ file reading and full HTTP headers parsing |
 | Nginx | 317789 | C |
 | Cypache | ? (estimate: approx. double from 216277 based on previous results) | Desynced connections in Cython/C++** w/ file reading and full HTTP headers parsing |
