@@ -5,6 +5,7 @@ from posix.fcntl cimport *
 from posix.unistd cimport *
 from libc.stdlib cimport malloc, free
 
+from libcpp cimport bool
 from libcpp.map cimport map
 from libcpp.string cimport string
 from libcpp.vector cimport vector
@@ -14,12 +15,14 @@ import resource
 cdef unsigned int maxFds = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
 
 cdef unsigned int timenow = 0
+cdef string timenow_string
 cdef string response = b""
 
 cdef:
   struct scachedFiledata:
     int fd
     unsigned int mtime
+    string mtime_string
     unsigned int lastcheckmtime
     string data
   map[string, scachedFiledata] cachedFiledata
@@ -68,11 +71,14 @@ cdef:
       body.assign(b"""<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n<style>\nhtml { color-scheme: light dark; }\nbody { width: 35em; margin: 0 auto;\nfont-family: Tahoma, Verdana, Arial, sans-serif; }\n</style>\n</head>\n<body>\n<h1>Welcome to nginx!</h1>\n<p>If you see this page, the nginx web server is successfully installed and\nworking. Further configuration is required.</p>\n\n<p>For online documentation and support please refer to\n<a href="http://nginx.org/">nginx.org</a>.<br/>\nCommercial support is available at\n<a href="http://nginx.com/">nginx.com</a>.</p>\n\n<p><em>Thank you for using nginx.</em></p>\n</body>\n</html>\n""")
     header.assign(b"HTTP/1.0 200 OK\r\n")
     header.append(b"Server: Cypache/1.0.1\r\n")
-    header.append(b"Date: %b\r\n") % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode()
+    header.append(b"Date: %b\r\n" % timenow_string)
     header.append(b"Content-Type: text/html\r\n")
     header.append(b"Content-Length: %d\r\n" % body.size())
     if cachedFiledataPtr:
-      header.append(b"Last-Modified: %b\r\n" % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(cachedFiledataPtr.mtime)).encode())
+      if cachedFiledataPtr.mtime_string.empty():
+        header.append(b"Last-Modified: %b\r\n" % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(cachedFiledataPtr.mtime)).encode())
+      else:
+        header.append(b"Last-Modified: %b\r\n" % cachedFiledataPtr.mtime_string)
     header.append(b"Connection: keep-alive\r\n")
     header.append(b"Accept-Ranges: bytes\r\n\r\n")
     return header + body
@@ -83,8 +89,9 @@ class WebServer(asyncio.Protocol):
 
   def data_received(self, data: bytes):
     cdef:
+      bool timeIsSame = True
       double newtime
-      unsigned int newtimeint
+      unsigned int newtimeint, checkMtime
       double lastmtime = 0.0
       int fd, oldfd
       scachedFiledata *cachedFiledataPtr
@@ -104,6 +111,10 @@ class WebServer(asyncio.Protocol):
     # Get time
     newtime = time.time()
     newtimeint = <unsigned int>newtime
+    if newtimeint != timenow:
+      timenow = newtimeint
+      timenow_string = time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode()
+      timeIsSame = False
 
     # Check if data is already cached
     if cachedFiledata.count(httpUri):
@@ -121,7 +132,10 @@ class WebServer(asyncio.Protocol):
       # Ensure at least 1 second has passed since the last mtime check (perf boost by only updating file once every second thus reducing calls to stat)
       if cachedFiledataPtr.lastcheckmtime < newtimeint:
         cachedFiledataPtr.lastcheckmtime = newtimeint
-        cachedFiledataPtr.mtime = <unsigned int>getFileMtime(fd)
+        checkMtime = <unsigned int>getFileMtime(fd)
+        if checkMtime != cachedFiledataPtr.mtime:
+          cachedFiledataPtr.mtime_string = time.strftime("%a, %d %b %Y %T %Z", time.gmtime(checkMtime)).encode()
+        cachedFiledataPtr.mtime = checkMtime
         if cachedFiledataPtr.mtime == newtimeint:
           cachedFiledataPtr.data = readcachedFiledata(cachedFiledataPtr.fd)
       self.transport.send(httpGenerateHeaders(cachedFiledataPtr))
@@ -133,6 +147,7 @@ class WebServer(asyncio.Protocol):
       if fd != -1:
         cachedFiledataStruct.data = readcachedFiledata(fd)
         cachedFiledataStruct.mtime = <unsigned int>getFileMtime(fd)
+        cachedFiledataStruct.mtime_string = time.strftime("%a, %d %b %Y %T %Z", time.gmtime(checkMtime)).encode()
         cachedFiledataStruct.lastcheckmtime = newtimeint
         cachedFiledata[httpUri] = cachedFiledataStruct
         cachedFiledataPtr = &cachedFiledata[httpUri]
@@ -140,8 +155,8 @@ class WebServer(asyncio.Protocol):
 
       # File does not exist ("404"/default page)
       else:
-        if newtimeint != timenow:
-          timenow = newtimeint
+        if not timeIsSame:
+          #timenow = newtimeint
           response = httpGenerateHeaders(NULL)
           #response = b"""HTTP/1.0 200 OK\r\nServer: nginx/1.22.1\r\nDate: %b\r\nContent-Type: text/html\r\nContent-Length: 615\r\nLast-Modified: Fri, 15 Nov 2024 22:21:58 GMT\r\nConnection: keep-alive\r\nAccept-Ranges: bytes\r\n\r\n<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n<style>\nhtml { color-scheme: light dark; }\nbody { width: 35em; margin: 0 auto;\nfont-family: Tahoma, Verdana, Arial, sans-serif; }\n</style>\n</head>\n<body>\n<h1>Welcome to nginx!</h1>\n<p>If you see this page, the nginx web server is successfully installed and\nworking. Further configuration is required.</p>\n\n<p>For online documentation and support please refer to\n<a href="http://nginx.org/">nginx.org</a>.<br/>\nCommercial support is available at\n<a href="http://nginx.com/">nginx.com</a>.</p>\n\n<p><em>Thank you for using nginx.</em></p>\n</body>\n</html>\n""" % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode()
         self.transport.send(response)
