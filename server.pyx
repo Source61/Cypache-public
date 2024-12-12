@@ -59,18 +59,24 @@ cdef:
     free(charptr)
     return s
   
-  string httpGenerateHeaders(scachedFiledata* cachedFiledataPtr=NULL):
+  string httpGenerateHeaders(scachedFiledata* cachedFiledataPtr):
     cdef string header
+    cdef string body
+    if cachedFiledataPtr:
+      body.assign(cachedFiledataPtr.data)
+    else:
+      body.assign(b"""<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n<style>\nhtml { color-scheme: light dark; }\nbody { width: 35em; margin: 0 auto;\nfont-family: Tahoma, Verdana, Arial, sans-serif; }\n</style>\n</head>\n<body>\n<h1>Welcome to nginx!</h1>\n<p>If you see this page, the nginx web server is successfully installed and\nworking. Further configuration is required.</p>\n\n<p>For online documentation and support please refer to\n<a href="http://nginx.org/">nginx.org</a>.<br/>\nCommercial support is available at\n<a href="http://nginx.com/">nginx.com</a>.</p>\n\n<p><em>Thank you for using nginx.</em></p>\n</body>\n</html>\n""")
     header.assign(b"HTTP/1.0 200 OK\r\n")
-    header.append(b"Server: Cypache/1.0.0\r\n")
+    header.append(b"Server: Cypache/1.0.1\r\n")
     header.append(b"Date: %b\r\n") % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode()
     header.append(b"Content-Type: text/html\r\n")
-    header.append(b"Content-Length: 615\r\n")
-    header.append(b"Last-Modified: Fri, 15 Nov 2024 22:21:58 GMT\r\n")
+    header.append(b"Content-Length: %d\r\n" % body.size())
+    if cachedFiledataPtr:
+      header.append(b"Last-Modified: %b\r\n" % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(cachedFiledataPtr.mtime)).encode())
     header.append(b"Connection: keep-alive\r\n")
     header.append(b"Accept-Ranges: bytes\r\n\r\n")
-    header.append(b"""<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n<style>\nhtml { color-scheme: light dark; }\nbody { width: 35em; margin: 0 auto;\nfont-family: Tahoma, Verdana, Arial, sans-serif; }\n</style>\n</head>\n<body>\n<h1>Welcome to nginx!</h1>\n<p>If you see this page, the nginx web server is successfully installed and\nworking. Further configuration is required.</p>\n\n<p>For online documentation and support please refer to\n<a href="http://nginx.org/">nginx.org</a>.<br/>\nCommercial support is available at\n<a href="http://nginx.com/">nginx.com</a>.</p>\n\n<p><em>Thank you for using nginx.</em></p>\n</body>\n</html>\n""")
-
+    return header + body
+    
 class WebServer(asyncio.Protocol):
   def connection_made(self, transport):
     self.transport = transport
@@ -130,13 +136,13 @@ class WebServer(asyncio.Protocol):
         cachedFiledataStruct.lastcheckmtime = newtimeint
         cachedFiledata[httpUri] = cachedFiledataStruct
         cachedFiledataPtr = &cachedFiledata[httpUri]
-        self.transport.send(httpGernateHeaders(cachedFiledataPtr))
+        self.transport.send(httpGenerateHeaders(cachedFiledataPtr))
 
       # File does not exist ("404"/default page)
       else:
         if newtimeint != timenow:
           timenow = newtimeint
-          response = httpGenerateHeaders()
+          response = httpGenerateHeaders(NULL)
           #response = b"""HTTP/1.0 200 OK\r\nServer: nginx/1.22.1\r\nDate: %b\r\nContent-Type: text/html\r\nContent-Length: 615\r\nLast-Modified: Fri, 15 Nov 2024 22:21:58 GMT\r\nConnection: keep-alive\r\nAccept-Ranges: bytes\r\n\r\n<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n<style>\nhtml { color-scheme: light dark; }\nbody { width: 35em; margin: 0 auto;\nfont-family: Tahoma, Verdana, Arial, sans-serif; }\n</style>\n</head>\n<body>\n<h1>Welcome to nginx!</h1>\n<p>If you see this page, the nginx web server is successfully installed and\nworking. Further configuration is required.</p>\n\n<p>For online documentation and support please refer to\n<a href="http://nginx.org/">nginx.org</a>.<br/>\nCommercial support is available at\n<a href="http://nginx.com/">nginx.com</a>.</p>\n\n<p><em>Thank you for using nginx.</em></p>\n</body>\n</html>\n""" % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode()
         self.transport.send(response)
   
@@ -144,4 +150,4 @@ class WebServer(asyncio.Protocol):
     pass
     #print("eof_received")
 
-fastepoll.run_forever(WebServer, ":::80")
+fastepoll.run_forever(WebServer, ":::80", False)
