@@ -5,7 +5,6 @@ sys.path.append('.')
 from posix.stat cimport *
 from posix.fcntl cimport *
 from posix.unistd cimport *
-from posix.stdlib cimport realpath
 from libc.stdlib cimport malloc, free
 
 from libcpp cimport bool
@@ -35,8 +34,12 @@ cdef:
     string data
   map[string, sCachedFiledata] cachedFiledata
   map[int, string] cachedFiledataReverse
-
   vector[int] fds
+
+  struct sCachedFilepath:
+    string path
+    unsigned int lastchecktime
+  map[string, sCachedFilepath] cachedFilepaths
 
   int appendFd(string uri):
     cdef int fd = open(uri.c_str(), O_RDONLY)
@@ -115,9 +118,9 @@ class WebServer(asyncio.Protocol):
       int fd = -1, oldfd
       sCachedFiledata *cachedFiledataPtr
       sCachedFiledata cachedFiledataStruct
+      sCachedFilepath *cachedFilepathPtr = NULL
       string httpUri
       string absHttpUri
-      char* resolvedPath
     global response, timenow, timenow_string
     # Parse HTTP Headers
     bufferlist = data.split(b'\r\n\r\n', 1)
@@ -128,9 +131,9 @@ class WebServer(asyncio.Protocol):
       httpUri, httpParams = httpUri.split(b'?', 1)
       httpParams = httpParams.split('&')
 
-    httpUri = wwwDir + httpUri
+    httpUri = wwwDir + httpUri.lstrip(b"/")
 
-    # Get time and buffer time_string
+    # Get time and buffer time_string if 1s has passed
     newtime = time.time()
     newtimeint = <unsigned int>newtime
     if newtimeint != timenow:
@@ -138,22 +141,31 @@ class WebServer(asyncio.Protocol):
       timenow_string = time.strftime("%a, %d %b %Y %T %Z", time.gmtime(timenow)).encode()
       timeIsSame = False
 
-    # Start handling URI (so far using realpath is causing segfault for some reason, must not be using it properly...?)
-    absHttpUri = os.path.abspath(httpUri)
-    #resolvedPath = realpath(httpUri.c_str(), NULL)
-    #absHttpUri = resolvedPath
-    #free(resolvedPath)
+    # Start handling URI
+
+    # Cache paths; faster by another 20-25% at max capacity; lasts 1s as usual
+    if cachedFilepaths.count(httpUri):
+      cachedFilepathPtr = &cachedFilepaths[httpUri]
+    if cachedFilepathPtr == NULL or cachedFilepathPtr.lastchecktime != newtimeint:
+      if not cachedFilepathPtr:
+        cachedFilepaths[httpUri] = sCachedFilepath(os.path.abspath(httpUri) + b"/", timenow)
+        cachedFilepathPtr = &cachedFilepaths[httpUri]
+      else:
+        cachedFilepathPtr.lastchecktime = timenow
+        cachedFilepathPtr.path = os.path.abspath(httpUri) + b"/"
+    
+    absHttpUri.assign(cachedFilepathPtr.path) # os.path.abspath is faster than Posix's C realpath(...)
 
     # 1. Ensure URI filepath is valid, else send 400 Invalid Request
-    if not absHttpUri.startswith(wwwDir):
+    if not absHttpUri.startswith(wwwDir): # This too is actually slightly faster than C strncmp
       self.transport.send(httpGenerateHeaders(NULL, 400))
       return
     
     # Indexes
     elif os.path.isdir(absHttpUri):
       for index in indexes:
-        if os.path.isfile(absHttpUri + b"/" + index):
-          httpUri = absHttpUri + b"/" + index
+        if os.path.isfile(absHttpUri + index):
+          httpUri = absHttpUri + index
           found = True
           break
 
@@ -188,7 +200,7 @@ class WebServer(asyncio.Protocol):
       if fd != -1:
         cachedFiledataStruct.data = readCachedFiledata(fd)
         cachedFiledataStruct.mtime = <unsigned int>getFileMtime(fd)
-        cachedFiledataStruct.mtime_string = time.strftime("%a, %d %b %Y %T %Z", time.gmtime(checkMtime)).encode()
+        cachedFiledataStruct.mtime_string = time.strftime("%a, %d %b %Y %T %Z", time.gmtime(cachedFiledataStruct.mtime)).encode()
         cachedFiledataStruct.lastcheckmtime = newtimeint
         cachedFiledata[httpUri] = cachedFiledataStruct
         cachedFiledataPtr = &cachedFiledata[httpUri]
@@ -211,7 +223,8 @@ import config
 if not hasattr(config, "wwwDir"): fatalError("Config.py: Missing wwwDir entry.")
 if type(config.wwwDir) == str: config.wwwDir = config.wwwDir.encode()
 elif type(config.wwwDir) != bytes: fatalError("Config.py: wwwDir variable must be of type str or bytes.")
-cdef string wwwDir = os.path.abspath(config.wwwDir)
+elif not os.path.isdir(config.wwwDir): fatalError("Config.py: wwwDir is not a path to a directory.")
+cdef string wwwDir = os.path.abspath(config.wwwDir) + b"/"
 
 cdef vector[string] indexes = []
 if hasattr(config, "indexes"):

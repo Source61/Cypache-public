@@ -1,2 +1,2 @@
-git add design.txt *.pyx *.py README.md LICENSE index.html commit
+git add design.txt src *.py README.md LICENSE www commit
 git commit
