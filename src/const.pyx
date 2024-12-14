@@ -8,3 +8,6 @@ cdef:
     400: b"Bad Request",
     404: b"Not Found",
   }
+
+  unsigned long long maxFds
+  unsigned long long maxFilepaths = 10000

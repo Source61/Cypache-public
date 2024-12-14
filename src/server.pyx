@@ -15,7 +15,7 @@ from cython.operator cimport dereference as deref
 
 include "const.pyx"
 
-cdef unsigned int maxFds = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+maxFds, maxPossibleFds = resource.getrlimit(resource.RLIMIT_NOFILE)
 
 cdef unsigned int timenow = 0
 cdef string timenow_string
@@ -40,6 +40,7 @@ cdef:
     string path
     unsigned int lastchecktime
   map[string, sCachedFilepath] cachedFilepaths
+  vector[string] filepaths
 
   int appendFd(string uri):
     cdef int fd = open(uri.c_str(), O_RDONLY)
@@ -80,15 +81,12 @@ cdef:
     cdef string body
 
     # Assign body first; we need it to know the content-length header
-    if statusCode == 200:
-      if cachedFiledataPtr:
-        body.assign(cachedFiledataPtr.data)
-      else:
-        body.assign(b"""<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n<style>\nhtml { color-scheme: light dark; }\nbody { width: 35em; margin: 0 auto;\nfont-family: Tahoma, Verdana, Arial, sans-serif; }\n</style>\n</head>\n<body>\n<h1>Welcome to nginx!</h1>\n<p>If you see this page, the nginx web server is successfully installed and\nworking. Further configuration is required.</p>\n\n<p>For online documentation and support please refer to\n<a href="http://nginx.org/">nginx.org</a>.<br/>\nCommercial support is available at\n<a href="http://nginx.com/">nginx.com</a>.</p>\n\n<p><em>Thank you for using nginx.</em></p>\n</body>\n</html>\n""")
+    if statusCode == 200 and cachedFiledataPtr:
+      body.assign(cachedFiledataPtr.data)
     elif statusCode == 400:
-      body.assign(b"<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<hr><center>nginx/1.22.1</center>\r\n</body>\r\n</html>\r\n")
+      body.assign(b"<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<hr><center>%b/%b</center>\r\n</body>\r\n</html>\r\n" % (env[b"Server"], env[b"Version"]))
     elif statusCode == 404:
-      body.assign(b"<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx/1.22.1</center>\r\n</body>\r\n</html>\r\n")
+      body.assign(b"<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>%b/%b</center>\r\n</body>\r\n</html>\r\n" % (env[b"Server"], env[b"Version"]))
 
     # Assign headers next
     header.assign(b"HTTP/1.0 %d %b\r\n" % (statusCode, statusCodes[statusCode]))
@@ -97,10 +95,10 @@ cdef:
     header.append(b"Content-Type: text/html\r\n")
     header.append(b"Content-Length: %d\r\n" % body.size())
     if cachedFiledataPtr:
-      if not cachedFiledataPtr.mtime_string.empty():
+      #if not cachedFiledataPtr.mtime_string.empty():
       #  header.append(b"Last-Modified: %b\r\n" % time.strftime("%a, %d %b %Y %T %Z", time.gmtime(cachedFiledataPtr.mtime)).encode())
       #else:
-        header.append(b"Last-Modified: %b\r\n" % cachedFiledataPtr.mtime_string)
+      header.append(b"Last-Modified: %b\r\n" % cachedFiledataPtr.mtime_string)
     header.append(b"Connection: keep-alive\r\n")
     header.append(b"Accept-Ranges: bytes\r\n\r\n")
     return header + body
@@ -121,6 +119,7 @@ class WebServer(asyncio.Protocol):
       sCachedFilepath *cachedFilepathPtr = NULL
       string httpUri
       string absHttpUri
+      string filepathTmp
     global response, timenow, timenow_string
     # Parse HTTP Headers
     bufferlist = data.split(b'\r\n\r\n', 1)
@@ -146,15 +145,22 @@ class WebServer(asyncio.Protocol):
     # Cache paths; faster by another 20-25% at max capacity; lasts 1s as usual
     if cachedFilepaths.count(httpUri):
       cachedFilepathPtr = &cachedFilepaths[httpUri]
-    if cachedFilepathPtr == NULL or cachedFilepathPtr.lastchecktime != newtimeint:
+    if maxFilepaths and (cachedFilepathPtr == NULL or cachedFilepathPtr.lastchecktime != newtimeint):
       if not cachedFilepathPtr:
+        if filepaths.size() >= maxFilepaths:
+          filepathTmp = deref(filepaths.begin())
+          cachedFilepaths.erase(filepathTmp)
+          filepaths.erase(filepaths.begin())
         cachedFilepaths[httpUri] = sCachedFilepath(os.path.abspath(httpUri) + b"/", timenow)
         cachedFilepathPtr = &cachedFilepaths[httpUri]
       else:
         cachedFilepathPtr.lastchecktime = timenow
         cachedFilepathPtr.path = os.path.abspath(httpUri) + b"/"
-    
-    absHttpUri.assign(cachedFilepathPtr.path) # os.path.abspath is faster than Posix's C realpath(...)
+
+    if maxFilepaths:
+      absHttpUri.assign(cachedFilepathPtr.path) # os.path.abspath is faster than Posix's C realpath(...)
+    else:
+      absHttpUri = os.path.abspath(httpUri) + b"/"
 
     # 1. Ensure URI filepath is valid, else send 400 Invalid Request
     if not absHttpUri.startswith(wwwDir): # This too is actually slightly faster than C strncmp
@@ -220,17 +226,31 @@ class WebServer(asyncio.Protocol):
 # Setup config
 import config
 
-if not hasattr(config, "wwwDir"): fatalError("Config.py: Missing wwwDir entry.")
+if not hasattr(config, "wwwDir"): fatalError("Config.py: Missing required wwwDir entry.")
 if type(config.wwwDir) == str: config.wwwDir = config.wwwDir.encode()
 elif type(config.wwwDir) != bytes: fatalError("Config.py: wwwDir variable must be of type str or bytes.")
 elif not os.path.isdir(config.wwwDir): fatalError("Config.py: wwwDir is not a path to a directory.")
 cdef string wwwDir = os.path.abspath(config.wwwDir) + b"/"
 
-cdef vector[string] indexes = []
+cdef vector[string] indexes
 if hasattr(config, "indexes"):
-  if type(config.indexes) != list: fatalError("Config.py: The 'indexes' variable must be a list of bytes.")
-  elif any([type(x) != bytes for x in config.indexes]): fatalError("Config.py: The 'indexes' variable must be a list of bytes.")
-  indexes = config.indexes
+  if type(config.indexes) != list: fatalError("Config.py: The 'indexes' variable must be a list of str/bytes.")
+  elif any([type(x) not in [bytes, str] for x in config.indexes]): fatalError("Config.py: The 'indexes' variable must be a list of str/bytes.")
+  indexes = [x if type(x) == bytes else x.encode() for x in config.indexes]
+
+if hasattr(config, "maxFds"):
+  if type(config.maxFds) != int: fatalError("Config.py: The 'maxFds' variable must be of type int.")
+  if config.maxFds > 0xFFFFFFFFFFFFFFFF or config.maxFds < -1 or config.maxFds == 0: fatalError("Config.py: The 'maxFds' value must be -1 or > 0 and < 0xFFFFFFFFFFFFFFFF")
+  if config.maxFds != maxFds:
+    if config.maxFds == -1:
+      config.maxFds = maxPossibleFds
+    resource.setrlimit(resource.RLIMIT_NOFILE, (config.maxFds, maxPossibleFds))
+    maxFds = config.maxFds
+
+if hasattr(config, "maxFilepaths"):
+  if type(config.maxFilepaths) != int: fatalError("Config.py: The 'maxFilepaths' variable must be of type int.")
+  if config.maxFilepaths > 0xFFFFFFFFFFFFFFFF or config.maxFilepaths < 0: fatalError("Config.py: The 'maxFilepaths' value must be >= 0 and < 0xFFFFFFFFFFFFFFFF")
+  maxFilepaths = config.maxFilepaths
 
 # Run
 import fastepoll
