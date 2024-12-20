@@ -11,3 +11,10 @@ cdef:
 
   unsigned long long maxFds
   unsigned long long maxFilepaths = 10000
+  bool mvcPattern
+  string wwwDir
+  string appsDir
+  string rewritePathsTo
+  vector[string] indexes
+
+  dict pyModules = {}

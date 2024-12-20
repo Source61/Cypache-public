@@ -1,4 +1,4 @@
-import asyncio, resource, os, sys, time
+import asyncio, importlib, resource, os, sys, time
 
 sys.path.append('.')
 
@@ -222,6 +222,31 @@ class WebServer(asyncio.Protocol):
     pass
     #print("eof_received")
 
+cdef void loadModules(bytes loadDir):
+  import importlib, pkgutil, os
+  global pyModules
+
+  pyDir = loadDir.decode()
+  pyModules = {}
+
+  def load_module(name, package=None):
+    print("Loading", name, package)
+    loaded = importlib.import_module(name, package)
+    if name.find(".") != -1 and not hasattr(loaded, "onRequest"):
+      fatalError("Module %s does not have method onRequest" % name)
+    path = os.path.abspath(name.replace(".", "/"))
+    pyModules[path] = loaded
+    return loaded
+
+  load_module(pyDir)
+
+  for root, dirs, files in os.walk(pyDir):
+    checkDir = root
+    for module in pkgutil.iter_modules([checkDir]):
+      abspath = module.module_finder.path
+      parent = None if abspath not in pyModules else pyModules[abspath]
+      relpath = checkDir.replace("/", ".") + "." + module.name
+      load_module(relpath, parent)
 
 # Setup config
 import config
@@ -230,9 +255,16 @@ if not hasattr(config, "wwwDir"): fatalError("Config.py: Missing required wwwDir
 if type(config.wwwDir) == str: config.wwwDir = config.wwwDir.encode()
 elif type(config.wwwDir) != bytes: fatalError("Config.py: wwwDir variable must be of type str or bytes.")
 elif not os.path.isdir(config.wwwDir): fatalError("Config.py: wwwDir is not a path to a directory.")
-cdef string wwwDir = os.path.abspath(config.wwwDir) + b"/"
+wwwDir = os.path.abspath(config.wwwDir) + b"/"
 
-cdef vector[string] indexes
+if not hasattr(config, "appsDir"): fatalError("Config.py: Missing required appsDir entry.")
+if type(config.appsDir) == str: config.appsDir = config.appsDir.encode()
+elif type(config.appsDir) != bytes: fatalError("Config.py: appsDir variable must be of type str or bytes.")
+elif not os.path.isdir(config.appsDir): fatalError("Config.py: appsDir is not a path to a directory.")
+appsDir = os.path.relpath(config.appsDir)
+
+loadModules(appsDir)
+
 if hasattr(config, "indexes"):
   if type(config.indexes) != list: fatalError("Config.py: The 'indexes' variable must be a list of str/bytes.")
   elif any([type(x) not in [bytes, str] for x in config.indexes]): fatalError("Config.py: The 'indexes' variable must be a list of str/bytes.")
@@ -251,6 +283,8 @@ if hasattr(config, "maxFilepaths"):
   if type(config.maxFilepaths) != int: fatalError("Config.py: The 'maxFilepaths' variable must be of type int.")
   if config.maxFilepaths > 0xFFFFFFFFFFFFFFFF or config.maxFilepaths < 0: fatalError("Config.py: The 'maxFilepaths' value must be >= 0 and < 0xFFFFFFFFFFFFFFFF")
   maxFilepaths = config.maxFilepaths
+
+exit()
 
 # Run
 import fastepoll
