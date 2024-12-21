@@ -22,6 +22,8 @@ cdef string timenow_string
 cdef string response = b""
 
 cdef:
+  bool isPythonFile
+
   void fatalError(msg):
     print(msg)
     exit(1)
@@ -102,6 +104,26 @@ cdef:
     header.append(b"Connection: keep-alive\r\n")
     header.append(b"Accept-Ranges: bytes\r\n\r\n")
     return header + body
+  
+  string newHttpFilepath(string& originalHttpUri):
+    global isPythonFile
+    isPythonFile = False
+    cdef string absHttpUri = originalHttpUri
+    #print(wwwDir + absHttpUri, appsDir + absHttpUri)
+    if os.path.exists(wwwDir + absHttpUri):
+      absHttpUri = wwwDir + absHttpUri
+    elif os.path.exists(appsDir + absHttpUri):
+      absHttpUri = appsDir + absHttpUri
+      isPythonFile = True
+    else:
+      return b""
+    # Indexes
+    if os.path.isdir(absHttpUri):
+      for index in indexes:
+        if os.path.isfile(absHttpUri + index):
+          absHttpUri = absHttpUri + index
+          break
+    return absHttpUri
     
 class WebServer(asyncio.Protocol):
   def connection_made(self, transport):
@@ -130,7 +152,7 @@ class WebServer(asyncio.Protocol):
       httpUri, httpParams = httpUri.split(b'?', 1)
       httpParams = httpParams.split('&')
 
-    httpUri = wwwDir + httpUri.lstrip(b"/")
+    httpUri = httpUri.lstrip(b"/") # we've now removed wwwDir from this
 
     # Get time and buffer time_string if 1s has passed
     newtime = time.time()
@@ -146,34 +168,34 @@ class WebServer(asyncio.Protocol):
     if cachedFilepaths.count(httpUri):
       cachedFilepathPtr = &cachedFilepaths[httpUri]
     if maxFilepaths and (cachedFilepathPtr == NULL or cachedFilepathPtr.lastchecktime != newtimeint):
+      absHttpUri = newHttpFilepath(httpUri)
       if not cachedFilepathPtr:
         if filepaths.size() >= maxFilepaths:
           filepathTmp = deref(filepaths.begin())
           cachedFilepaths.erase(filepathTmp)
           filepaths.erase(filepaths.begin())
-        cachedFilepaths[httpUri] = sCachedFilepath(os.path.abspath(httpUri) + b"/", timenow)
+        cachedFilepaths[httpUri] = sCachedFilepath(absHttpUri, timenow)
         cachedFilepathPtr = &cachedFilepaths[httpUri]
       else:
         cachedFilepathPtr.lastchecktime = timenow
-        cachedFilepathPtr.path = os.path.abspath(httpUri) + b"/"
+        cachedFilepathPtr.path = absHttpUri
 
-    if maxFilepaths:
-      absHttpUri.assign(cachedFilepathPtr.path) # os.path.abspath is faster than Posix's C realpath(...)
-    else:
-      absHttpUri = os.path.abspath(httpUri) + b"/"
-
-    # 1. Ensure URI filepath is valid, else send 400 Invalid Request
-    if not absHttpUri.startswith(wwwDir): # This too is actually slightly faster than C strncmp
+    #if maxFilepaths:
+    #  absHttpUri.assign(cachedFilepathPtr.path) # os.path.abspath is faster than Posix's C realpath(...)
+    if not maxFilepaths:
+      absHttpUri = newHttpFilepath(httpUri)
+    # Ensure URI filepath is valid, else send 400 Invalid Request
+    if absHttpUri.empty():
       self.transport.send(httpGenerateHeaders(NULL, 400))
       return
-    
-    # Indexes
-    elif os.path.isdir(absHttpUri):
-      for index in indexes:
-        if os.path.isfile(absHttpUri + index):
-          httpUri = absHttpUri + index
-          found = True
-          break
+    httpUri = absHttpUri
+
+    if isPythonFile:
+      if <bytes>absHttpUri not in pyModules:
+        fatalError("%s not in pyModules" % absHttpUri.decode())
+      cachedFiledataStruct.data = pyModules[absHttpUri].onRequest()
+      self.transport.send(httpGenerateHeaders(&cachedFiledataStruct, 200))
+      return
 
     # Check if data is already cached
     if cachedFiledata.count(httpUri):
@@ -227,15 +249,15 @@ cdef void loadModules(bytes loadDir):
   global pyModules
 
   pyDir = loadDir.decode()
-  pyModules = {}
 
   def load_module(name, package=None):
     print("Loading", name, package)
     loaded = importlib.import_module(name, package)
     if name.find(".") != -1 and not hasattr(loaded, "onRequest"):
       fatalError("Module %s does not have method onRequest" % name)
-    path = os.path.abspath(name.replace(".", "/"))
+    path = os.path.abspath(name.replace(".", "/") + ".py").encode()
     pyModules[path] = loaded
+    print("Loaded", path)
     return loaded
 
   load_module(pyDir)
@@ -261,9 +283,9 @@ if not hasattr(config, "appsDir"): fatalError("Config.py: Missing required appsD
 if type(config.appsDir) == str: config.appsDir = config.appsDir.encode()
 elif type(config.appsDir) != bytes: fatalError("Config.py: appsDir variable must be of type str or bytes.")
 elif not os.path.isdir(config.appsDir): fatalError("Config.py: appsDir is not a path to a directory.")
-appsDir = os.path.relpath(config.appsDir)
+appsDir = os.path.abspath(config.appsDir) + b"/"
 
-loadModules(appsDir)
+loadModules(os.path.relpath(appsDir))
 
 if hasattr(config, "indexes"):
   if type(config.indexes) != list: fatalError("Config.py: The 'indexes' variable must be a list of str/bytes.")
@@ -284,7 +306,7 @@ if hasattr(config, "maxFilepaths"):
   if config.maxFilepaths > 0xFFFFFFFFFFFFFFFF or config.maxFilepaths < 0: fatalError("Config.py: The 'maxFilepaths' value must be >= 0 and < 0xFFFFFFFFFFFFFFFF")
   maxFilepaths = config.maxFilepaths
 
-exit()
+#exit()
 
 # Run
 import fastepoll

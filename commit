@@ -1,2 +1,2 @@
-git add design.txt src *.py README.md LICENSE www commit compile bench.sh cycompile
+git add .gitignore design.txt src *.py README.md LICENSE apps www commit compile bench.sh cycompile
 git commit
