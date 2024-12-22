@@ -41,6 +41,7 @@ cdef:
   struct sCachedFilepath:
     string path
     unsigned int lastchecktime
+    bool isPython
   map[string, sCachedFilepath] cachedFilepaths
   vector[string] filepaths
 
@@ -142,7 +143,7 @@ class WebServer(asyncio.Protocol):
       string httpUri
       string absHttpUri
       string filepathTmp
-    global response, timenow, timenow_string
+    global response, timenow, timenow_string, isPythonFile
     # Parse HTTP Headers
     bufferlist = data.split(b'\r\n\r\n', 1)
     headersList, postData = bufferlist[0].split(b'\r\n'), bufferlist[1]
@@ -167,6 +168,7 @@ class WebServer(asyncio.Protocol):
     # Cache paths; faster by another 20-25% at max capacity; lasts 1s as usual
     if cachedFilepaths.count(httpUri):
       cachedFilepathPtr = &cachedFilepaths[httpUri]
+      isPythonFile = cachedFilepathPtr.isPython
     if maxFilepaths and (cachedFilepathPtr == NULL or cachedFilepathPtr.lastchecktime != newtimeint):
       absHttpUri = newHttpFilepath(httpUri)
       if not cachedFilepathPtr:
@@ -174,15 +176,15 @@ class WebServer(asyncio.Protocol):
           filepathTmp = deref(filepaths.begin())
           cachedFilepaths.erase(filepathTmp)
           filepaths.erase(filepaths.begin())
-        cachedFilepaths[httpUri] = sCachedFilepath(absHttpUri, timenow)
+        cachedFilepaths[httpUri] = sCachedFilepath(absHttpUri, timenow, isPythonFile)
         cachedFilepathPtr = &cachedFilepaths[httpUri]
       else:
         cachedFilepathPtr.lastchecktime = timenow
         cachedFilepathPtr.path = absHttpUri
 
-    #if maxFilepaths:
-    #  absHttpUri.assign(cachedFilepathPtr.path) # os.path.abspath is faster than Posix's C realpath(...)
-    if not maxFilepaths:
+    if maxFilepaths:
+      absHttpUri.assign(cachedFilepathPtr.path) # os.path.abspath is faster than Posix's C realpath(...)
+    else:
       absHttpUri = newHttpFilepath(httpUri)
     # Ensure URI filepath is valid, else send 400 Invalid Request
     if absHttpUri.empty():

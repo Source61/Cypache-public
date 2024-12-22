@@ -13,7 +13,7 @@ rewritePathTo = b""
 # Optional arguments
 
 # Defaults to []
-indexes = [b"index.html", b"index.py"]
+indexes = [b"index.py", b"index.html"]
 
 # Defaults to ulimit -n, -1 is max (higher values potentially increases performance, but uses up more file descriptors)
 maxFds = -1
