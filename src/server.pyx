@@ -110,7 +110,9 @@ cdef:
     global isPythonFile
     isPythonFile = False
     cdef string absHttpUri = originalHttpUri
-    #print(wwwDir + absHttpUri, appsDir + absHttpUri)
+    # Security check that we're not trying to traverse out of any given dirs
+    if not absHttpUri.empty() and os.path.relpath(absHttpUri).find(b"..") != -1:
+      return b""
     if os.path.exists(wwwDir + absHttpUri):
       absHttpUri = wwwDir + absHttpUri
     elif os.path.exists(appsDir + absHttpUri):
